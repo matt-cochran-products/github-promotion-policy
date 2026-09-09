@@ -1,0 +1,45 @@
+name: promotion-source
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  validate-source:
+    name: validate-source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce feature to dev to staging to main
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BASE_REF" in
+            dev)
+              case "$HEAD_REF" in
+                dev|staging|main)
+                  echo "::error::dev accepts feature branches, not $HEAD_REF"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            staging)
+              [ "$HEAD_REF" = "dev" ] || {
+                echo "::error::staging accepts only dev; got $HEAD_REF"
+                exit 1
+              }
+              ;;
+            main)
+              [ "$HEAD_REF" = "staging" ] || {
+                echo "::error::main accepts only staging; got $HEAD_REF"
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::unexpected protected target: $BASE_REF"
+              exit 1
+              ;;
+          esac
