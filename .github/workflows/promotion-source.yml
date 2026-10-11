@@ -14,9 +14,19 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
+          # Fork branch names are attacker-chosen; only same-repository
+          # branches may use the hotfix lane.
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         shell: bash
         run: |
           set -euo pipefail
+          # Hotfix lane: a same-repository hotfix/* branch may target staging
+          # or main directly, so a production fix need not ship everything
+          # waiting on dev. Open the matching hotfix PR into dev as well.
+          hotfix=false
+          if [ "$SAME_REPO" = "true" ]; then
+            case "$HEAD_REF" in hotfix/?*) hotfix=true ;; esac
+          fi
           case "$BASE_REF" in
             dev)
               case "$HEAD_REF" in
@@ -27,14 +37,14 @@ jobs:
               esac
               ;;
             staging)
-              [ "$HEAD_REF" = "dev" ] || {
-                echo "::error::staging accepts only dev; got $HEAD_REF"
+              [ "$HEAD_REF" = "dev" ] || [ "$hotfix" = "true" ] || {
+                echo "::error::staging accepts only dev or a hotfix/* branch; got $HEAD_REF"
                 exit 1
               }
               ;;
             main)
-              [ "$HEAD_REF" = "staging" ] || {
-                echo "::error::main accepts only staging; got $HEAD_REF"
+              [ "$HEAD_REF" = "staging" ] || [ "$hotfix" = "true" ] || {
+                echo "::error::main accepts only staging or a hotfix/* branch; got $HEAD_REF"
                 exit 1
               }
               ;;
