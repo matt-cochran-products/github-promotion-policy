@@ -17,6 +17,8 @@ jobs:
           # Fork branch names are attacker-chosen; only same-repository
           # branches may use the hotfix lane.
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # The repository running this required workflow, set by GitHub.
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -27,12 +29,22 @@ jobs:
           if [ "$SAME_REPO" = "true" ]; then
             case "$HEAD_REF" in hotfix/?*) hotfix=true ;; esac
           fi
+          # Back-merge lane: infra alone may merge its own main/staging into
+          # dev, paired with merge-policy-dev-backmerge allowing merge commits
+          # there, so dev keeps their ancestry. Everywhere else dev stays
+          # feature-only.
+          backmerge=false
+          if [ "$SAME_REPO" = "true" ] && [ "$REPOSITORY" = "matt-cochran-products/infra" ]; then
+            case "$HEAD_REF" in staging|main) backmerge=true ;; esac
+          fi
           case "$BASE_REF" in
             dev)
               case "$HEAD_REF" in
                 dev|staging|main)
-                  echo "::error::dev accepts feature branches, not $HEAD_REF"
-                  exit 1
+                  [ "$backmerge" = "true" ] || {
+                    echo "::error::dev accepts feature branches, not $HEAD_REF"
+                    exit 1
+                  }
                   ;;
               esac
               ;;
