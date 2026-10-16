@@ -8,10 +8,12 @@ permissions: {}
 jobs:
   validate-source:
     name: validate-source
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 5
     steps:
       - name: Enforce feature to dev to staging to main
         env:
+          CI_RUNNER_MODE: ${{ vars.CI_RUNNER_MODE || 'github' }}
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
           # Fork branch names are attacker-chosen; only same-repository
@@ -22,6 +24,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "${CI_RUNNER_MODE:-github}" in
+            github|blacksmith) ;;
+            *) echo '::error::CI_RUNNER_MODE must be github or blacksmith'; exit 1 ;;
+          esac
           # Hotfix lane: a same-repository hotfix/* branch may target staging
           # or main directly, so a production fix need not ship everything
           # waiting on dev. Open the matching hotfix PR into dev as well.
