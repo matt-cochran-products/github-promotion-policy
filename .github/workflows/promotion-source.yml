@@ -2,6 +2,7 @@ name: promotion-source
 
 on:
   pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
 
 permissions: {}
 
@@ -28,9 +29,9 @@ jobs:
             github|blacksmith) ;;
             *) echo '::error::CI_RUNNER_MODE must be github or blacksmith'; exit 1 ;;
           esac
-          # Hotfix lane: a same-repository hotfix/* branch may target staging
-          # or main directly, so a production fix need not ship everything
-          # waiting on dev. Open the matching hotfix PR into dev as well.
+          # A same-repository hotfix may enter staging for full validation.
+          # Main accepts staging only until an isolated hotfix artifact/acceptance
+          # contract exists. A branch prefix never permits a main rebuild.
           hotfix=false
           if [ "$SAME_REPO" = "true" ]; then
             case "$HEAD_REF" in hotfix/?*) hotfix=true ;; esac
@@ -59,14 +60,16 @@ jobs:
               esac
               ;;
             staging)
+              [ "$SAME_REPO" = "true" ] || { echo '::error::staging promotion must be same-repository'; exit 1; }
               [ "$HEAD_REF" = "dev" ] || [ "$hotfix" = "true" ] || {
                 echo "::error::staging accepts only dev or a hotfix/* branch; got $HEAD_REF"
                 exit 1
               }
               ;;
             main)
-              [ "$HEAD_REF" = "staging" ] || [ "$hotfix" = "true" ] || {
-                echo "::error::main accepts only staging or a hotfix/* branch; got $HEAD_REF"
+              [ "$SAME_REPO" = "true" ] || { echo '::error::main promotion must be same-repository'; exit 1; }
+              [ "$HEAD_REF" = "staging" ] || {
+                echo "::error::main accepts only validated staging; got $HEAD_REF"
                 exit 1
               }
               ;;
