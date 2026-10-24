@@ -36,14 +36,14 @@ jobs:
           if [ "$SAME_REPO" = "true" ]; then
             case "$HEAD_REF" in hotfix/?*) hotfix=true ;; esac
           fi
-          # Back-merge lane: infra and business-ops may merge their own main/staging into
+          # Back-merge lane: the explicitly enrolled repos may merge their own main/staging into
           # dev, paired with merge-policy-dev-backmerge allowing merge commits
           # there, so dev keeps their ancestry. Everywhere else dev stays
           # feature-only.
           backmerge=false
           if [ "$SAME_REPO" = "true" ]; then
             case "$REPOSITORY" in
-              matt-cochran-products/infra|matt-cochran-products/business-ops)
+              matt-cochran-products/infra|matt-cochran-products/business-ops|matt-cochran-products/mcproductlabs-site)
                 case "$HEAD_REF" in staging|main) backmerge=true ;; esac
                 ;;
             esac
