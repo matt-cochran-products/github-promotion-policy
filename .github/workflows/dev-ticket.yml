@@ -16,6 +16,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
+      # Read current PR metadata even on reruns of an original opened event.
       # No checkout or PR code execution: only GitHub metadata is read.
       - name: Require a real issue for this change
         env:
@@ -24,12 +25,61 @@ jobs:
         shell: bash
         run: |
           node --input-type=module <<'NODE'
-          import { readFileSync, appendFileSync } from 'node:fs';
-          if (!['github', 'blacksmith'].includes(process.env.CI_RUNNER_MODE)) throw new Error('Invalid CI_RUNNER_MODE');
-          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-          const pr = event.pull_request;
-          if (pr.base.ref !== 'dev') throw new Error('This policy applies only to dev PRs');
+          import { readFileSync, appendFileSync, writeSync } from 'node:fs';
           const repository = process.env.GITHUB_REPOSITORY;
+          let number, head;
+          function fail(code, action, status) {
+            const http = Number.isInteger(status) && status >= 100 && status <= 599 ? ` HTTP ${status}.` : '';
+            const message = `${code}.${http} ${action}`;
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${message}\n`);
+            writeSync(2, `::error::${message}\n`);
+            process.exit(1);
+          }
+          if (!['github', 'blacksmith'].includes(process.env.CI_RUNNER_MODE))
+            fail('DEV_TICKET_RUNNER_MODE_INVALID', 'Set CI_RUNNER_MODE to github or blacksmith.');
+          let event;
+          try { event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')); }
+          catch { fail('DEV_TICKET_EVENT_UNAVAILABLE', 'Retain this original run and inspect its event metadata.'); }
+          const original = event?.pull_request;
+          const positive = value => Number.isSafeInteger(value) && value > 0;
+          const repoName = value => typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
+          if (!repoName(repository) || !positive(event?.repository?.id) || event.repository.full_name !== repository ||
+              String(event.repository.id) !== process.env.GITHUB_REPOSITORY_ID || !positive(original?.number) ||
+              event.number !== original.number || !positive(original.id) || original.base?.ref !== 'dev' ||
+              original.base.repo?.id !== event.repository.id || original.base.repo?.full_name !== repository ||
+              typeof original.head?.sha !== 'string' || !/^[a-f0-9]{40}$/.test(original.head.sha) || !positive(original.head?.repo?.id) ||
+              !repoName(original.head.repo.full_name))
+            fail('DEV_TICKET_EVENT_IDENTITY_REFUSED', 'Use the metadata job for this exact repository, dev PR and source head.');
+          number = original.number; head = original.head.sha;
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Metadata-only ticket check: ${repository} PR ${number}, head ${head}. Reads current PR metadata; executes no PR code.\n`);
+          async function metadata(path, kind) {
+            let response;
+            try {
+              response = await fetch(`https://api.github.com/${path}`, {
+                redirect: 'error', signal: AbortSignal.timeout(10000),
+                headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
+              });
+            } catch {
+              fail(`DEV_TICKET_${kind}_READ_UNAVAILABLE`, 'Check GitHub API reachability; then rerun only this metadata job at the unchanged PR head.');
+            }
+            if (kind === 'ISSUE' && response.status === 404) return null;
+            if (!response.ok)
+              fail(`DEV_TICKET_${kind}_READ_REFUSED`, 'Check read access for this job token; then rerun only this metadata job at the unchanged PR head.', response.status);
+            try { return await response.json(); }
+            catch (error) {
+              if (error?.name === 'AbortError' || error?.name === 'TimeoutError')
+                fail(`DEV_TICKET_${kind}_READ_UNAVAILABLE`, 'Check GitHub API reachability; then rerun only this metadata job at the unchanged PR head.');
+              fail(`DEV_TICKET_${kind}_RESPONSE_INVALID`, 'Retain the original run; GitHub metadata must be valid JSON before retry.');
+            }
+          }
+          const pr = await metadata(`repos/${repository}/pulls/${number}`, 'PR');
+          if (!pr || pr.number !== number || pr.id !== original.id || pr.state !== 'open' || pr.base?.ref !== 'dev' ||
+              pr.base.repo?.id !== event.repository.id || pr.base.repo?.full_name !== repository ||
+              pr.head?.sha !== head || pr.head.repo?.id !== original.head.repo.id ||
+              pr.head.repo?.full_name !== original.head.repo.full_name || typeof pr.title !== 'string' ||
+              !(pr.body === null || typeof pr.body === 'string'))
+            fail('DEV_TICKET_LIVE_PR_IDENTITY_REFUSED', 'This run does not match the current dev PR/head; use its current-head metadata run, not a stale rerun.');
           const text = `${pr.title}\n${pr.body || ''}`;
           const refs = new Map();
           for (const m of text.matchAll(/https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)/g)) refs.set(`${m[1]}#${m[2]}`, [m[1], m[2]]);
@@ -37,19 +87,18 @@ jobs:
             const repo = m[1] || repository;
             refs.set(`${repo}#${m[2]}`, [repo, m[2]]);
           }
-          if (!refs.size) throw new Error('Link a GitHub issue in the PR title or body: Refs #123 or an issue URL');
-          for (const [repo, number] of [...refs.values()].slice(0, 20)) {
-            // GitHub owner names are case-insensitive.
+          if (!refs.size)
+            fail('DEV_TICKET_ISSUE_REFERENCE_REQUIRED', 'Add a real readable issue URL to the current PR title/body, then rerun only this original metadata job; do not push a source commit or reopen the PR.');
+          for (const [repo, issueNumber] of [...refs.values()].slice(0, 20)) {
+            // GitHub owner names are case-insensitive; fork source code is never executed.
             if (!['matt-cochran-products', 'matt-cochran'].includes(repo.split('/')[0].toLowerCase())) continue;
-            const response = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
-              headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
-            });
-            if (response.status === 404) continue;
-            if (!response.ok) throw new Error(`Cannot verify issue metadata: HTTP ${response.status}`);
-            const issue = await response.json();
-            if (issue.pull_request) continue;
-            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Change tracked by [${repo}#${number}](${issue.html_url}).\n`);
+            const issue = await metadata(`repos/${repo}/issues/${issueNumber}`, 'ISSUE');
+            if (!issue || issue.pull_request || issue.number !== Number(issueNumber) ||
+                typeof issue.html_url !== 'string' ||
+                issue.html_url.toLowerCase() !== `https://github.com/${repo}/issues/${issueNumber}`.toLowerCase()) continue;
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              `Change tracked by [${repo}#${issueNumber}](https://github.com/${repo}/issues/${issueNumber}) using live PR metadata.\n`);
             process.exit(0);
           }
-          throw new Error('No accessible GitHub issue was verified. PR links and issue-shaped text do not count; use a readable issue in the managed repositories.');
+          fail('DEV_TICKET_REAL_ISSUE_UNVERIFIED', 'Use a readable GitHub issue in the managed namespaces; PR numbers do not count. Then rerun only this metadata job at the same head.');
           NODE
